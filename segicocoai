@@ -2,8 +2,8 @@
 -- Auto Farm Token Script - Bee Swarm Simulator
 -- UI: WindUI (Modern Dark Theme) with Field Selection, Direct Tween,
 -- Accurate Screen Buff Reading (rbxassetid://17354253598),
--- and Smart Multi-Player Coconut Combo Juggling System (Field-Locked & Fail/100x Safe)
--- With Configurable Combo Tween Speed (Matching Field Tween Speed)
+-- Smart Multi-Player Coconut Combo Juggling System (Field-Locked & Fail/100x Safe),
+-- and Sequential Star Shower Ground Disk Teleportation (Sıra Sıra Yeşil Halkaya Işınlanma)
 -- ====================================================================
 
 if getgenv().AutoFarmTokenCleanup then
@@ -117,9 +117,10 @@ local DEFAULT_CONFIG = {
     ComboMovementMode = "Ayarlanan Hızla Tween (Slider)",
     ComboTweenSpeed = 95, -- Ayarlanabilir combo tween hızı (stud/s)
     
-    -- Star Shower & Normal Coconut Settings
-    StarShowerTweenEnabled = true, -- Küçük yeşil halkalara (Star Shower) hızlı süzülme (Varsayılan: AÇIK)
-    StarShowerTweenSpeed = 100, -- Star Shower süzülme hızı (stud/s)
+    -- Star Shower (Düşen Yıldızların Yerdeki Küçük Yeşil Halkaları)
+    StarShowerTweenEnabled = true, -- Küçük yeşil halkalara sıra sıra gitme (Varsayılan: AÇIK)
+    StarShowerMovementMode = "Anında Işınlanma (TP)", -- Kullanıcı isteği: Sıra sıra içine ışınlanma (Varsayılan: TP)
+    StarShowerTweenSpeed = 120, -- Tween modu seçilirse süzülme hızı (stud/s)
     FastTweenToNormalCoconut = false, -- Normal büyük hindistan cevizlerine süzülme (Varsayılan: KAPALI)
     NormalCoconutTweenSpeed = 100, -- Normal coconut süzülme hızı (stud/s)
 
@@ -419,7 +420,43 @@ local function getComboCoconutsInfo(ourField)
     return ourCombo, otherCombo, anyComboExists, maxPoints
 end
 
--- Helper: Find Active Star Shower (Small Green Disks / Guides) inside active field
+-- ====================================================================
+-- YERDEKİ STAR SHOWER YEŞİL HALKALARI (WARNINGDISK) SIRA SIRA TAKİP SİSTEMİ
+-- Düşen yıldızların (Star Shower) zeminde oluşturduğu küçük yeşil halkaları tespit eder.
+-- Havadaki "Star Shower Guide" yıldızına ASLA gitmez; yerdeki yeşil halkaları
+-- oluşma sırasına (1, 2, 3...) göre sırayla yakalar ve içine ışınlanır!
+-- ====================================================================
+local starShowerDisks = {} -- [BasePart] = spawnTimestamp
+
+local function isStarShowerDisk(obj)
+    if not obj or not obj:IsA("BasePart") then return false end
+    if obj.Name ~= "WarningDisk" then return false end
+
+    -- Star Shower diskleri küçüktür (genellikle 8x0.4x8 stud, CylinderMesh)
+    -- Coconut yeşil diskleri ise büyüktür (Size.X >= 14)
+    if obj.Size.X >= 12 or obj.Size.Z >= 12 then return false end
+
+    -- Yeşil Renk Kontrolü (Neon Green)
+    local c = obj.Color
+    local isGreen = (c.G > 0.6 and c.G > c.R and c.G > c.B) or (c.G * 255 >= 180 and c.R * 255 <= 120)
+    if not isGreen then return false end
+
+    -- Şeffaflaşmış/kaybolan diskleri yoksay
+    if obj.Transparency >= 0.9 then return false end
+
+    -- Hindistan cevizi combo disklerini (üzerinde 🥥 veya x yazanları) hariç tut
+    local guiAttach = obj:FindFirstChild("GuiAttach") or obj:FindFirstChildWhichIsA("BillboardGui", true)
+    if guiAttach then
+        local textLabel = guiAttach:FindFirstChildWhichIsA("TextLabel", true)
+        if textLabel and textLabel.Text and (textLabel.Text:find("🥥") or textLabel.Text:find("x")) then
+            return false
+        end
+    end
+
+    return true
+end
+
+-- Düşen yıldızların yerdeki yeşil halkalarını (WarningDisk) oluşma sırasına göre bulur
 local function getActiveStarShowerDisk(currentField)
     local hum, hrp = getCharacterComponents()
     if not hrp then return nil end
@@ -427,37 +464,48 @@ local function getActiveStarShowerDisk(currentField)
     local particles = Workspace:FindFirstChild("Particles")
     if not particles then return nil end
 
-    local bestPos = nil
-    local shortestDist = math.huge
+    local now = os.clock()
 
+    -- 1. Particles klasöründeki yeni yeşil diskleri zaman damgasıyla kaydet
     for _, obj in ipairs(particles:GetChildren()) do
-        if obj:IsA("BasePart") then
-            local isStarShower = false
-            -- Sadece yerdeki küçük yeşil WarningDisk (< 14 stud) veya Star Shower Guide
-            if obj.Name == "WarningDisk" and obj.Size.X < 14 and obj.Transparency < 0.9 then
-                isStarShower = true
-            elseif obj.Name == "Star Shower Guide" then
-                isStarShower = true
-            end
-
-            if isStarShower then
-                local inField = true
-                if Config.LockToField and currentField then
-                    inField = isInsideField(obj.Position, currentField)
-                end
-
-                if inField then
-                    local dist = (obj.Position - hrp.Position).Magnitude
-                    if dist < shortestDist and dist <= Config.MaxDistance then
-                        shortestDist = dist
-                        bestPos = obj.Position
-                    end
-                end
+        if isStarShowerDisk(obj) then
+            if not starShowerDisks[obj] then
+                starShowerDisks[obj] = now
             end
         end
     end
 
-    return bestPos
+    -- 2. Silinen veya süresi dolan diskleri temizle ve geçerlileri topla
+    local validDisks = {}
+    for disk, spawnTime in pairs(starShowerDisks) do
+        if not disk.Parent or disk.Parent ~= particles or not isStarShowerDisk(disk) then
+            starShowerDisks[disk] = nil
+        else
+            local inField = true
+            if Config.LockToField and currentField and currentField ~= "Mevcut Konum (Otomatik)" then
+                inField = isInsideField(disk.Position, currentField)
+            end
+
+            local distToPlayer = (disk.Position - hrp.Position).Magnitude
+            if inField and distToPlayer <= (Config.MaxDistance or 160) then
+                table.insert(validDisks, { disk = disk, spawnTime = spawnTime, dist = distToPlayer })
+            end
+        end
+    end
+
+    if #validDisks == 0 then return nil end
+
+    -- 3. SIRA SIRA IŞINLANMA: İlk doğan (en eski) yeşil halkaya öncelik ver!
+    -- Yıldız 1 düşer -> İçine ışınlanır. 1 kaybolunca -> Yıldız 2'ye ışınlanır.
+    -- Böylece 1'den 10'a kadar tüm yıldızların yeşil halkalarını sıra sıra toplar!
+    table.sort(validDisks, function(a, b)
+        if math.abs(a.spawnTime - b.spawnTime) > 0.15 then
+            return a.spawnTime < b.spawnTime
+        end
+        return a.dist < b.dist
+    end)
+
+    return validDisks[1].disk
 end
 
 -- Helper: Find Active Normal Coconut Disks (Large Green Disks, Size.X >= 14) inside active field
@@ -473,7 +521,7 @@ local function getActiveCoconutDisk(currentField)
 
     for _, obj in ipairs(particles:GetChildren()) do
         if obj:IsA("BasePart") and (obj.Name == "WarningDisk" or (obj.Name == "AreaRing" and obj.Color.G > 0.65)) then
-            -- Coconut disks are large: Size.X >= 14
+            -- Coconut diskleri büyüktür: Size.X >= 14
             if obj.Size.X >= 14 or obj.Name == "AreaRing" then
                 local guiAttach = obj:FindFirstChild("GuiAttach") or obj:FindFirstChildWhichIsA("BillboardGui", true)
                 local isCombo = false
@@ -633,7 +681,6 @@ local function tweenToGroundTarget(targetPos, customSpeed)
     if not hum or not hrp or not targetPos then return end
 
     local startPos = hrp.Position
-    -- ZEMİN YÜKSEKLİĞİNDE KAL: Havadaki hindistan cevizine asla yükselmez, yerde zemin seviyesinde süzülür
     local endPos = Vector3.new(targetPos.X, hrp.Position.Y, targetPos.Z)
     local dist = (startPos - endPos).Magnitude
     if dist < 2.0 then
@@ -661,7 +708,6 @@ local function tweenToGroundTarget(targetPos, customSpeed)
     if flatDir.Magnitude < 0.1 then flatDir = hrp.CFrame.LookVector else flatDir = flatDir.Unit end
     local targetCF = CFrame.lookAt(endPos, endPos + flatDir)
 
-    -- Hız: Alana gitme tween hızıyla birebir aynı (veya özel hız)
     local speed = customSpeed or Config.TweenSpeed or 95
     local duration = math.clamp(dist / speed, 0.04, 3.5)
 
@@ -714,13 +760,13 @@ local InfoTab = Window:Tab({
 -- Status display (FarmTab)
 local StatusParagraph = FarmTab:Paragraph({
     Title = "Durum Paneli",
-    Desc = string.format("Seçili Alan: %s\nDurum: Durduruldu (Kapalı)\nToplanan: 0 | Alandaki Token: 0", Config.SelectedField),
+    Desc = string.format("Seçili Alan: %s\\nDurum: Durduruldu (Kapalı)\\nToplanan: 0 | Alandaki Token: 0", Config.SelectedField),
 })
 
 -- Status display (CocoTab)
 local CocoStatusParagraph = CocoTab:Paragraph({
     Title = "Coconut Belt Takip Paneli",
-    Desc = "Coconut Sayacı: 0 / 40\nDurum: Beklemede",
+    Desc = "Coconut Sayacı: 0 / 40\\nDurum: Beklemede",
 })
 
 local function updateStatusUI()
@@ -728,7 +774,7 @@ local function updateStatusUI()
     local currentActiveField = (inComboFieldMode and Config.ComboField) or Config.SelectedField
     local pollenText = string.format("Çanta: %%%.1f (%s / %s)", Stats.PollenPercent or 0, formatNumber(Stats.Pollen), formatNumber(Stats.Capacity))
     local descText = string.format(
-        "Aktif Alan: %s | %s\nDurum: %s\nToplanan Token: %d | Alandaki Token: %d",
+        "Aktif Alan: %s | %s\\nDurum: %s\\nToplanan Token: %d | Alandaki Token: %d",
         currentActiveField,
         pollenText,
         Stats.Status,
@@ -742,7 +788,7 @@ local function updateStatusUI()
     local comboInfo = (maxComboSeen > 0 and string.format(" (Max: %dx)", maxComboSeen)) or ""
     local comboSpeedText = (Config.ComboMovementMode == "Anında Işınlanma (TP)" and "Anında TP") or string.format("Tween (%d stud/s)", Config.ComboTweenSpeed or Config.TweenSpeed or 95)
     local cocoText = string.format(
-        "Coconut Belt Sayacı: %d / 40 (Eşik: %d)%s\nMod: %s\nHareket: %s\n0x Durumu: %s\nDurum: %s",
+        "Coconut Belt Sayacı: %d / 40 (Eşik: %d)%s\\nMod: %s\\nHareket: %s\\n0x Durumu: %s\\nDurum: %s",
         Stats.CoconutProgress,
         Config.CoconutThreshold,
         comboInfo,
@@ -775,12 +821,15 @@ local function syncUIElements()
         if UIControls.FarmAutoJump then UIControls.FarmAutoJump:Set(Config.AutoJump) end
         if UIControls.FarmRoamWhenNoTokens then UIControls.FarmRoamWhenNoTokens:Set(Config.RoamWhenNoTokens) end
         if UIControls.FarmStarShowerTween then UIControls.FarmStarShowerTween:Set(Config.StarShowerTweenEnabled) end
+        if UIControls.FarmStarShowerMovementMode then UIControls.FarmStarShowerMovementMode:Select(Config.StarShowerMovementMode) end
+        if UIControls.FarmStarShowerTweenSpeed then UIControls.FarmStarShowerTweenSpeed:Set(Config.StarShowerTweenSpeed) end
         if UIControls.FarmComboTweenSpeed then UIControls.FarmComboTweenSpeed:Set(Config.ComboTweenSpeed) end
 
         if UIControls.CocoEnabled then UIControls.CocoEnabled:Set(Config.CoconutBeltEnabled) end
         if UIControls.CocoComboMovementMode then UIControls.CocoComboMovementMode:Select(Config.ComboMovementMode) end
         if UIControls.CocoComboTweenSpeed then UIControls.CocoComboTweenSpeed:Set(Config.ComboTweenSpeed) end
         if UIControls.CocoStarShowerTween then UIControls.CocoStarShowerTween:Set(Config.StarShowerTweenEnabled) end
+        if UIControls.CocoStarShowerMovementMode then UIControls.CocoStarShowerMovementMode:Select(Config.StarShowerMovementMode) end
         if UIControls.CocoStarShowerTweenSpeed then UIControls.CocoStarShowerTweenSpeed:Set(Config.StarShowerTweenSpeed) end
         if UIControls.CocoFastNormalCoconut then UIControls.CocoFastNormalCoconut:Set(Config.FastTweenToNormalCoconut) end
         if UIControls.CocoNormalCoconutTweenSpeed then UIControls.CocoNormalCoconutTweenSpeed:Set(Config.NormalCoconutTweenSpeed) end
@@ -814,7 +863,6 @@ UIControls.FarmSelectedField = FarmTab:Dropdown({
             local center = getFieldCenter(selected)
             if center then
                 Config.AnchorPosition = center
-                -- Eğer farming açıksa ve otomatik tween aktifse yeni alana doğrudan süzül!
                 if Config.Enabled and Config.AutoTweenToField and hrp and not isInsideField(hrp.Position, selected) then
                     safeTweenTo(center)
                 end
@@ -881,7 +929,6 @@ UIControls.FarmEnabled = FarmTab:Toggle({
                 Config.AnchorPosition = center or (hrp and hrp.Position)
             end
 
-            -- KULLANICININ İSTEDİĞİ GİBİ: Auto Farm Token açılınca eğer alanda değilsek ANINDA ALANA SÜZÜL!
             if Config.AutoTweenToField and center and hrp and not isInsideField(hrp.Position, Config.SelectedField) then
                 safeTweenTo(center)
             end
@@ -908,6 +955,7 @@ UIControls.FarmEnabled = FarmTab:Toggle({
             hasTriggeredConvert = false
             Stats.Converting = false
             Stats.ConvertState = "IDLE"
+            table.clear(starShowerDisks)
             if hum then
                 hum:Move(Vector3.zero, false)
             end
@@ -1002,8 +1050,8 @@ UIControls.FarmRoamWhenNoTokens = FarmTab:Toggle({
 })
 
 UIControls.FarmStarShowerTween = FarmTab:Toggle({
-    Title = "Star Shower'a Hızlı Tween (Küçük Yeşil Halkalar)",
-    Desc = "Yerdeki küçük yeşil Star Shower halkalarına hızlıca süzülür (Önerilen)",
+    Title = "Star Shower (Düşen Yıldızların Yeşil Halkaları)",
+    Desc = "Düşen yıldızların yerdeki yeşil halkalarına sıra sıra gider/ışınlanır",
     Value = Config.StarShowerTweenEnabled,
     Callback = function(state)
         if isSyncingUI then return end
@@ -1012,6 +1060,50 @@ UIControls.FarmStarShowerTween = FarmTab:Toggle({
         if UIControls.CocoStarShowerTween and UIControls.CocoStarShowerTween.Value ~= state then
             isSyncingUI = true
             pcall(function() UIControls.CocoStarShowerTween:Set(state) end)
+            isSyncingUI = false
+        end
+    end,
+})
+
+UIControls.FarmStarShowerMovementMode = FarmTab:Dropdown({
+    Title = "Star Shower Hareket Modu",
+    Desc = "Yerdeki yeşil halkaya anında mı ışınlanılsın (TP) yoksa süzülsün mü (Tween)?",
+    Values = { "Anında Işınlanma (TP)", "Ayarlanan Hızla Tween (Slider)" },
+    Value = Config.StarShowerMovementMode,
+    Callback = function(selected)
+        if isSyncingUI then return end
+        if selected:find("TP") or selected:find("Işınlanma") then
+            Config.StarShowerMovementMode = "Anında Işınlanma (TP)"
+        else
+            Config.StarShowerMovementMode = "Ayarlanan Hızla Tween (Slider)"
+        end
+        requestAutoSave()
+        if UIControls.CocoStarShowerMovementMode then
+            isSyncingUI = true
+            pcall(function() UIControls.CocoStarShowerMovementMode:Select(Config.StarShowerMovementMode) end)
+            isSyncingUI = false
+        end
+        WindUI:Notify({
+            Title = "Star Shower Modu",
+            Content = "Yeni mod: " .. Config.StarShowerMovementMode,
+            Duration = 2,
+            Icon = "sparkles",
+        })
+    end,
+})
+
+UIControls.FarmStarShowerTweenSpeed = FarmTab:Slider({
+    Title = "Star Shower Tween Hızı (Stud/s)",
+    Desc = "Tween modu seçildiğinde yeşil halkaya süzülme hızı (Varsayılan: 120)",
+    Value = { Min = 40, Max = 300, Default = Config.StarShowerTweenSpeed },
+    Step = 5,
+    Callback = function(val)
+        if isSyncingUI then return end
+        Config.StarShowerTweenSpeed = val
+        requestAutoSave()
+        if UIControls.CocoStarShowerTweenSpeed and UIControls.CocoStarShowerTweenSpeed.Value and UIControls.CocoStarShowerTweenSpeed.Value.Default ~= val then
+            isSyncingUI = true
+            pcall(function() UIControls.CocoStarShowerTweenSpeed:Set(val) end)
             isSyncingUI = false
         end
     end,
@@ -1086,8 +1178,8 @@ UIControls.CocoComboTweenSpeed = CocoTab:Slider({
 })
 
 UIControls.CocoStarShowerTween = CocoTab:Toggle({
-    Title = "Star Shower'a Hızlı Tween (Küçük Yeşil Halkalar)",
-    Desc = "Yerdeki küçük yeşil Star Shower halkalarına hızlıca süzülür (Varsayılan: AÇIK)",
+    Title = "Star Shower (Düşen Yıldızların Yeşil Halkaları)",
+    Desc = "Düşen yıldızların yerdeki yeşil halkalarına sıra sıra gider/ışınlanır",
     Value = Config.StarShowerTweenEnabled,
     Callback = function(state)
         if isSyncingUI then return end
@@ -1101,15 +1193,41 @@ UIControls.CocoStarShowerTween = CocoTab:Toggle({
     end,
 })
 
+UIControls.CocoStarShowerMovementMode = CocoTab:Dropdown({
+    Title = "Star Shower Hareket Modu",
+    Desc = "Yerdeki yeşil halkaya anında mı ışınlanılsın (TP) yoksa süzülsün mü (Tween)?",
+    Values = { "Anında Işınlanma (TP)", "Ayarlanan Hızla Tween (Slider)" },
+    Value = Config.StarShowerMovementMode,
+    Callback = function(selected)
+        if isSyncingUI then return end
+        if selected:find("TP") or selected:find("Işınlanma") then
+            Config.StarShowerMovementMode = "Anında Işınlanma (TP)"
+        else
+            Config.StarShowerMovementMode = "Ayarlanan Hızla Tween (Slider)"
+        end
+        requestAutoSave()
+        if UIControls.FarmStarShowerMovementMode then
+            isSyncingUI = true
+            pcall(function() UIControls.FarmStarShowerMovementMode:Select(Config.StarShowerMovementMode) end)
+            isSyncingUI = false
+        end
+    end,
+})
+
 UIControls.CocoStarShowerTweenSpeed = CocoTab:Slider({
     Title = "Star Shower Tween Hızı (Stud/s)",
-    Desc = "Star Shower küçük halkalarına yetişme hızı (Varsayılan: 100)",
+    Desc = "Tween modu seçildiğinde yeşil halkaya yetişme hızı (Varsayılan: 120)",
     Value = { Min = 40, Max = 300, Default = Config.StarShowerTweenSpeed },
     Step = 5,
     Callback = function(val)
         if isSyncingUI then return end
         Config.StarShowerTweenSpeed = val
         requestAutoSave()
+        if UIControls.FarmStarShowerTweenSpeed and UIControls.FarmStarShowerTweenSpeed.Value and UIControls.FarmStarShowerTweenSpeed.Value.Default ~= val then
+            isSyncingUI = true
+            pcall(function() UIControls.FarmStarShowerTweenSpeed:Set(val) end)
+            isSyncingUI = false
+        end
     end,
 })
 
@@ -1217,7 +1335,7 @@ UIControls.CharCustomSpeed = CharTab:Slider({
 -- 4. Info Tab Elements
 InfoTab:Paragraph({
     Title = "Dengeli Tween & Güvenli Paslaşma",
-    Desc = "• Combo coconut halkalarına ani ışınlanma yerine, alana gitme hızıyla (" .. tostring(Config.TweenSpeed) .. " stud/s) düz çizgide süzülür.\n• Başka tarladaki combo halkasına asla gitmez, kendi tarlasında bekler.\n• Combo bitene (100x veya fail) kadar tarladan ayrılmaz.",
+    Desc = "• Combo coconut halkalarına ani ışınlanma yerine, alana gitme hızıyla (" .. tostring(Config.TweenSpeed) .. " stud/s) düz çizgide süzülür.\\n• Başka tarladaki combo halkasına asla gitmez, kendi tarlasında bekler.\\n• Combo bitene (100x veya fail) kadar tarladan ayrılmaz.",
 })
 
 InfoTab:Paragraph({
@@ -1699,49 +1817,67 @@ task.spawn(function()
             end
 
             -- ========================================================
-            -- 2. STAR SHOWER (KÜÇÜK YEŞİL) & NORMAL COCONUT (BÜYÜK YEŞİL) TWEEN
+            -- 2. STAR SHOWER (YERDEKİ KÜÇÜK YEŞİL HALKALAR - SIRA SIRA IŞINLANMA)
+            -- VE NORMAL COCONUT (BÜYÜK YEŞİL HALKALAR)
             -- ========================================================
-            local targetGreenDisk = nil
-            local diskType = ""
-            local diskTweenSpeed = 100
+            local targetStarDisk = nil
 
-            -- Kullanıcı isteği: Sadece Star Shower (küçük yeşil) süzülür!
+            -- Düşen yıldızların yerdeki yeşil halkaları (WarningDisk)
             if Config.StarShowerTweenEnabled then
-                local starDiskPos = getActiveStarShowerDisk(currentTargetField)
-                if starDiskPos then
-                    targetGreenDisk = starDiskPos
-                    diskType = "⭐ Star Shower (Küçük Yeşil)"
-                    diskTweenSpeed = Config.StarShowerTweenSpeed or 100
-                end
+                targetStarDisk = getActiveStarShowerDisk(currentTargetField)
             end
 
-            -- Eğer star shower yoksa ve normal coconut tween'i açılmışsa:
-            if not targetGreenDisk and Config.FastTweenToNormalCoconut then
-                local cocoDiskPos = getActiveCoconutDisk(currentTargetField)
-                if cocoDiskPos then
-                    targetGreenDisk = cocoDiskPos
-                    diskType = "🥥 Normal Coconut (Büyük Yeşil)"
-                    diskTweenSpeed = Config.NormalCoconutTweenSpeed or 100
-                end
-            end
+            if targetStarDisk and targetStarDisk.Parent then
+                local diskPos = targetStarDisk.Position
+                -- Yerdeki halkanın tam ortası
+                local targetGroundPos = Vector3.new(diskPos.X, diskPos.Y + 3.2, diskPos.Z)
 
-            if targetGreenDisk then
-                local dist = (hrp.Position - targetGreenDisk).Magnitude
-                if dist > 2.0 then
-                    Stats.Status = diskType .. " Süzülünüyor..."
-                    tweenToGroundTarget(targetGreenDisk, diskTweenSpeed)
+                -- Kullanıcı isteği: Yeşil halkanın içine sıra sıra IŞINLANMA (veya isteğe bağlı hızlı tween)
+                if Config.StarShowerMovementMode == "Anında Işınlanma (TP)" then
+                    hrp.CFrame = CFrame.new(targetGroundPos)
+                    hrp.Velocity = Vector3.zero
+                    hum:Move(Vector3.zero, false)
+                    Stats.Status = "⭐ Star Shower (Yeşil Halka) İçine Işınlanıldı!"
+                else
+                    local dist = (hrp.Position - targetGroundPos).Magnitude
+                    if dist > 2.0 then
+                        Stats.Status = "⭐ Star Shower (Yeşil Halka) Süzülünüyor..."
+                        tweenToGroundTarget(targetGroundPos, Config.StarShowerTweenSpeed or 120)
+                    end
+                    hum:Move(Vector3.zero, false)
+                    hrp.Velocity = Vector3.zero
+                    Stats.Status = "⭐ Star Shower (Yeşil Halka) Bekleniyor / Alınıyor..."
                 end
-
-                hum:Move(Vector3.zero, false)
-                hrp.Velocity = Vector3.zero
-                Stats.Status = diskType .. " Bekleniyor / Alınıyor..."
 
                 if tick() - lastUiUpdate > 0.25 then
                     lastUiUpdate = tick()
                     updateStatusUI()
                 end
                 task.wait(0.03)
-                continue -- Token toplamayı durdur, yıldızı al!
+                continue -- Token toplamayı durdur, yıldızın yeşil halkasında kal!
+            end
+
+            -- Eğer star shower yoksa ve normal coconut tween'i açılmışsa:
+            if not targetStarDisk and Config.FastTweenToNormalCoconut then
+                local cocoDiskPos = getActiveCoconutDisk(currentTargetField)
+                if cocoDiskPos then
+                    local dist = (hrp.Position - cocoDiskPos).Magnitude
+                    if dist > 2.0 then
+                        Stats.Status = "🥥 Normal Coconut (Büyük Yeşil) Süzülünüyor..."
+                        tweenToGroundTarget(cocoDiskPos, Config.NormalCoconutTweenSpeed or 100)
+                    end
+
+                    hum:Move(Vector3.zero, false)
+                    hrp.Velocity = Vector3.zero
+                    Stats.Status = "🥥 Normal Coconut Bekleniyor / Alınıyor..."
+
+                    if tick() - lastUiUpdate > 0.25 then
+                        lastUiUpdate = tick()
+                        updateStatusUI()
+                    end
+                    task.wait(0.03)
+                    continue -- Normal coconut alınıyor
+                end
             end
 
             -- ========================================================
@@ -1911,6 +2047,7 @@ getgenv().AutoFarmTokenCleanup = function()
     if hum then
         hum:Move(Vector3.zero, false)
     end
+    table.clear(starShowerDisks)
     pcall(function()
         Window:Destroy()
     end)
