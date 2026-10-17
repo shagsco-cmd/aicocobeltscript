@@ -2,7 +2,7 @@
 -- Auto Farm Token Script - Bee Swarm Simulator
 -- UI: WindUI (Modern Dark Theme) with Field Selection, Direct Tween,
 -- Accurate Screen Buff Reading (rbxassetid://17354253598),
--- Fast Token Collection, Field Roaming & Configurable Combo Tween Speed
+-- Star Shower Small Rings Tween, Center-Anchored Fast Roaming & Dual Combo Sliders
 -- ====================================================================
 
 if getgenv().AutoFarmTokenCleanup then
@@ -84,9 +84,10 @@ local Config = {
     MaxDistance = 120,
     AutoJump = true,
     CustomSpeedEnabled = true, -- Varsayılan açık: Hızlı token toplama
-    CustomSpeed = 50, -- Hızlı yürüme (50 stud/s)
+    CustomSpeed = 60, -- Hızlı yürüme (60 stud/s)
     AnchorPosition = nil,
-    RoamWhenNoTokens = true, -- Token yokken tarlada gezin (Wander/Roam)
+    RoamWhenNoTokens = true, -- Merkezde sürekli devriye gezme (Wander/Roam)
+    CenterRoamRadius = 18, -- Merkez etrafında gezinme yarıçapı
     
     -- Coconut Belt Passive Settings
     CoconutBeltEnabled = true,
@@ -95,8 +96,12 @@ local Config = {
     ReturnToMainField = true,
     ComboMovementMode = "Tween (Slider Hızı)", -- "Tween (Slider Hızı)", "Anında Işınlanma (TP)"
     ComboTweenSpeed = 95, -- Ayarlanabilir combo tween hızı (stud/s)
-    FastTweenToNormalCoconut = true, -- Yerdeki yeşil halkalara hızlı tween
-    NormalCoconutTweenSpeed = 100, -- Hızlı süzülme (100 stud/s)
+    
+    -- Star Shower & Normal Coconut Settings
+    StarShowerTweenEnabled = true, -- Küçük yeşil halkalara (Star Shower) hızlı süzülme (Varsayılan: AÇIK)
+    StarShowerTweenSpeed = 100, -- Star Shower süzülme hızı (stud/s)
+    FastTweenToNormalCoconut = false, -- Normal büyük hindistan cevizlerine süzülme (Varsayılan: KAPALI)
+    NormalCoconutTweenSpeed = 100, -- Normal coconut süzülme hızı (stud/s)
 }
 
 local Stats = {
@@ -162,118 +167,51 @@ local function isInsideField(pos, fieldName)
     return math.abs(localPos.X) <= (half.X + 8) and math.abs(localPos.Z) <= (half.Z + 8)
 end
 
--- Helper: Get a safe random point inside a field for roaming when no tokens
-local function getRandomFieldPoint(fieldName)
-    if fieldName and fieldName ~= "Mevcut Konum (Otomatik)" and FlowerZonesFolder then
-        local fieldPart = FlowerZonesFolder:FindFirstChild(fieldName)
-        if fieldPart and fieldPart:IsA("BasePart") then
-            local size = fieldPart.Size
-            local rx = (math.random() - 0.5) * (size.X * 0.75)
-            local rz = (math.random() - 0.5) * (size.Z * 0.75)
-            local targetCF = fieldPart.CFrame * CFrame.new(rx, 3, rz)
-            return targetCF.Position
-        end
-    end
-
+-- Helper: Find Active Star Shower (Small Green Disks / Guides) inside active field
+local function getActiveStarShowerDisk(currentField)
     local hum, hrp = getCharacterComponents()
-    local center = Config.AnchorPosition or (hrp and hrp.Position)
-    if center then
-        local maxDist = (Config.MaxDistance or 100) * 0.6
-        local rx = (math.random() - 0.5) * 2 * maxDist
-        local rz = (math.random() - 0.5) * 2 * maxDist
-        return center + Vector3.new(rx, 0, rz)
-    end
-    return nil
-end
+    if not hrp then return nil end
 
--- GERÇEK CANLI EKRAN SAYACI OKUYUCUSU (TileGrid içindeki rbxassetid://17354253598 buff'ı)
-local function getLiveCoconutBeltStack()
-    local lp = Players.LocalPlayer
-    if not lp then return 0 end
-    local sg = lp.PlayerGui:FindFirstChild("ScreenGui")
-    if not sg then return 0 end
-
-    for _, tg in ipairs(sg:GetChildren()) do
-        if tg.Name == "TileGrid" then
-            for _, tile in ipairs(tg:GetChildren()) do
-                local icon = tile:FindFirstChildWhichIsA("ImageLabel", true) or tile:FindFirstChildWhichIsA("ImageButton", true)
-                if icon and icon.Image and string.find(tostring(icon.Image), "17354253598") then
-                    local label = tile:FindFirstChildWhichIsA("TextLabel", true)
-                    if label and label.Text and label.Text ~= "" then
-                        local num = tonumber(label.Text:match("%d+"))
-                        if num then
-                            return num
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return 0
-end
-
--- Helper: Scan for active combo coconut disks and differentiate between our field vs other fields
-local function getComboCoconutsInfo(ourField)
     local particles = Workspace:FindFirstChild("Particles")
-    if not particles then
-        return nil, nil, false, 0
-    end
+    if not particles then return nil end
 
-    local ourCombo = nil
-    local otherCombo = nil
-    local anyComboExists = false
-    local maxPoints = 0
+    local bestPos = nil
+    local shortestDist = math.huge
 
     for _, obj in ipairs(particles:GetChildren()) do
-        if obj:IsA("BasePart") and (obj.Name == "WarningDisk" or obj.Name == "AreaRing") then
-            local guiAttach = obj:FindFirstChild("GuiAttach") or obj:FindFirstChildWhichIsA("BillboardGui", true)
-            if guiAttach then
-                local textLabel = guiAttach:FindFirstChildWhichIsA("TextLabel", true)
-                if textLabel and textLabel.Text and (textLabel.Text:find("🥥") or textLabel.Text:find("x") or textLabel.Text:find("0")) then
-                    anyComboExists = true
-                    local points = tonumber(textLabel.Text:match("%d+")) or 0
-                    if points > maxPoints then
-                        maxPoints = points
-                    end
+        if obj:IsA("BasePart") then
+            local isStarShower = false
+            -- Star Shower WarningDisks have Radius=4 -> Size.X around 8 (< 14)
+            if obj.Name == "WarningDisk" and obj.Size.X < 14 then
+                isStarShower = true
+            elseif obj.Name == "Star Shower Guide" or obj.Name:find("StarShower") then
+                isStarShower = true
+            elseif obj.Name == "Star" and obj.Size.X <= 6 and obj.Transparency < 0.95 then
+                isStarShower = true
+            end
 
-                    local fieldName = getFieldNameAt(obj.Position)
-                    local comboData = {
-                        Position = obj.Position,
-                        Text = textLabel.Text,
-                        Field = fieldName,
-                        Points = points,
-                    }
+            if isStarShower then
+                local inField = true
+                if Config.LockToField and currentField then
+                    inField = isInsideField(obj.Position, currentField)
+                end
 
-                    local inOurField = false
-                    if ourField and ourField ~= "Mevcut Konum (Otomatik)" then
-                        inOurField = isInsideField(obj.Position, ourField)
-                    elseif ourField == "Mevcut Konum (Otomatik)" then
-                        local hum, hrp = getCharacterComponents()
-                        if hrp then
-                            local myField = getCurrentField()
-                            if myField then
-                                inOurField = isInsideField(obj.Position, myField)
-                            else
-                                inOurField = (obj.Position - hrp.Position).Magnitude <= Config.MaxDistance
-                            end
-                        end
-                    end
-
-                    if inOurField then
-                        ourCombo = comboData
-                    else
-                        otherCombo = comboData
+                if inField then
+                    local dist = (obj.Position - hrp.Position).Magnitude
+                    if dist < shortestDist and dist <= Config.MaxDistance then
+                        shortestDist = dist
+                        bestPos = obj.Position
                     end
                 end
             end
         end
     end
 
-    return ourCombo, otherCombo, anyComboExists, maxPoints
+    return bestPos
 end
 
--- Helper: Find Active Green Warning Disks on the GROUND ONLY inside active field!
-local function getActiveGreenWarningDisk(currentField)
+-- Helper: Find Active Normal Coconut Disks (Large Green Disks, Size.X >= 14) inside active field
+local function getActiveCoconutDisk(currentField)
     local hum, hrp = getCharacterComponents()
     if not hrp then return nil end
 
@@ -285,26 +223,29 @@ local function getActiveGreenWarningDisk(currentField)
 
     for _, obj in ipairs(particles:GetChildren()) do
         if obj:IsA("BasePart") and (obj.Name == "WarningDisk" or (obj.Name == "AreaRing" and obj.Color.G > 0.65)) then
-            local guiAttach = obj:FindFirstChild("GuiAttach") or obj:FindFirstChildWhichIsA("BillboardGui", true)
-            local isCombo = false
-            if guiAttach then
-                local textLabel = guiAttach:FindFirstChildWhichIsA("TextLabel", true)
-                if textLabel and textLabel.Text and (textLabel.Text:find("🥥") or textLabel.Text:find("x") or textLabel.Text:find("0")) then
-                    isCombo = true
-                end
-            end
-
-            if not isCombo then
-                local inField = true
-                if Config.LockToField and currentField then
-                    inField = isInsideField(obj.Position, currentField)
+            -- Coconut disks are large: Size.X >= 14
+            if obj.Size.X >= 14 or obj.Name == "AreaRing" then
+                local guiAttach = obj:FindFirstChild("GuiAttach") or obj:FindFirstChildWhichIsA("BillboardGui", true)
+                local isCombo = false
+                if guiAttach then
+                    local textLabel = guiAttach:FindFirstChildWhichIsA("TextLabel", true)
+                    if textLabel and textLabel.Text and (textLabel.Text:find("🥥") or textLabel.Text:find("x") or textLabel.Text:find("0")) then
+                        isCombo = true
+                    end
                 end
 
-                if inField then
-                    local dist = (obj.Position - hrp.Position).Magnitude
-                    if dist < shortestDist and dist <= Config.MaxDistance then
-                        shortestDist = dist
-                        bestPos = obj.Position
+                if not isCombo then
+                    local inField = true
+                    if Config.LockToField and currentField then
+                        inField = isInsideField(obj.Position, currentField)
+                    end
+
+                    if inField then
+                        local dist = (obj.Position - hrp.Position).Magnitude
+                        if dist < shortestDist and dist <= Config.MaxDistance then
+                            shortestDist = dist
+                            bestPos = obj.Position
+                        end
                     end
                 end
             end
@@ -713,6 +654,25 @@ FarmTab:Toggle({
     end,
 })
 
+FarmTab:Toggle({
+    Title = "Star Shower'a Hızlı Tween (Küçük Yeşil Halkalar)",
+    Desc = "Yerdeki küçük yeşil Star Shower halkalarına hızlıca süzülür (Önerilen)",
+    Value = true,
+    Callback = function(state)
+        Config.StarShowerTweenEnabled = state
+    end,
+})
+
+FarmTab:Slider({
+    Title = "Combo Coconut Tween Hızı (Stud/s)",
+    Desc = "Düşen combo coconut halkasına süzülme hızı (Varsayılan: 95)",
+    Value = { Min = 40, Max = 300, Default = 95 },
+    Step = 5,
+    Callback = function(val)
+        Config.ComboTweenSpeed = val
+    end,
+})
+
 -- 2. CocoTab (Coconut Belt Pasif Sistemi) Elements
 CocoTab:Toggle({
     Title = "Coconut Belt Oto Geçiş & Combo Paslaşma",
@@ -754,17 +714,36 @@ CocoTab:Slider({
 })
 
 CocoTab:Toggle({
-    Title = "Yerdeki Yeşil Halkalara Hızlı Tween",
-    Desc = "Tarlan içerisindeki yeşil uyarı halkalarına hızlı süzülür",
+    Title = "Star Shower'a Hızlı Tween (Küçük Yeşil Halkalar)",
+    Desc = "Yerdeki küçük yeşil Star Shower halkalarına hızlıca süzülür (Varsayılan: AÇIK)",
     Value = true,
+    Callback = function(state)
+        Config.StarShowerTweenEnabled = state
+    end,
+})
+
+CocoTab:Slider({
+    Title = "Star Shower Tween Hızı (Stud/s)",
+    Desc = "Star Shower küçük halkalarına yetişme hızı (Varsayılan: 100)",
+    Value = { Min = 40, Max = 300, Default = 100 },
+    Step = 5,
+    Callback = function(val)
+        Config.StarShowerTweenSpeed = val
+    end,
+})
+
+CocoTab:Toggle({
+    Title = "Normal Coconut'a Hızlı Tween (Büyük Yeşil Halkalar)",
+    Desc = "Açılırsa normal büyük hindistan cevizlerine de gider (Varsayılan: KAPALI)",
+    Value = false,
     Callback = function(state)
         Config.FastTweenToNormalCoconut = state
     end,
 })
 
 CocoTab:Slider({
-    Title = "Yeşil Halka Tween Hızı (Stud/s)",
-    Desc = "Yerdeki normal yeşil halkalara yetişme hızı (Varsayılan: 100)",
+    Title = "Normal Coconut Tween Hızı (Stud/s)",
+    Desc = "Yerdeki normal büyük yeşil halkalara yetişme hızı (Varsayılan: 100)",
     Value = { Min = 40, Max = 300, Default = 100 },
     Step = 5,
     Callback = function(val)
@@ -830,8 +809,8 @@ CharTab:Toggle({
 
 CharTab:Slider({
     Title = "Yürüme Hızı Değeri",
-    Desc = "Tokenlere ve tarla içinde gezinirken kullanılacak hız (Varsayılan: 50)",
-    Value = { Min = 16, Max = 120, Default = 50 },
+    Desc = "Tokenlere ve tarla içinde gezinirken kullanılacak hız (Varsayılan: 60)",
+    Value = { Min = 16, Max = 120, Default = 60 },
     Step = 2,
     Callback = function(val)
         Config.CustomSpeed = val
@@ -844,8 +823,8 @@ InfoTab:Paragraph({
     Desc = "• Combo coconut halkalarına ani ışınlanma yerine, alana gitme hızıyla (" .. tostring(Config.TweenSpeed) .. " stud/s) düz çizgide süzülür.\n• Başka tarladaki combo halkasına asla gitmez, kendi tarlasında bekler.\n• Combo bitene (100x veya fail) kadar tarladan ayrılmaz.",
 })
 
--- Best Token Finder for current active field
-local function getBestToken(targetField)
+-- Best Token Finder for current active field (supports maxRadius)
+local function getBestToken(targetField, maxRadius)
     local hum, hrp = getCharacterComponents()
     if not hum or not hrp then return nil, 0 end
 
@@ -870,7 +849,7 @@ local function getBestToken(targetField)
                 if inField then
                     nearbyCount = nearbyCount + 1
                     local distToPlayer = (c.Position - hrp.Position).Magnitude
-                    if distToPlayer < shortestDist then
+                    if (not maxRadius or distToPlayer <= maxRadius) and distToPlayer < shortestDist then
                         shortestDist = distToPlayer
                         bestToken = c
                     end
@@ -888,8 +867,8 @@ local running = true
 local lastPos = nil
 local stuckTimer = 0
 local lastUiUpdate = 0
-local wanderTarget = nil
-local lastWanderTime = 0
+local returningToCenter = false
+local roamAngle = 0
 
 task.spawn(function()
     while running do
@@ -1084,33 +1063,54 @@ task.spawn(function()
             end
 
             -- ========================================================
-            -- 2. SADECE BULUNDUĞUMUZ TARLADAKİ YEŞİL HALKALARA TWEEN
+            -- 2. STAR SHOWER (KÜÇÜK YEŞİL) & NORMAL COCONUT (BÜYÜK YEŞİL) TWEEN
             -- ========================================================
-            if Config.FastTweenToNormalCoconut then
-                local greenDiskPos = getActiveGreenWarningDisk(currentTargetField)
-                if greenDiskPos then
-                    local dist = (hrp.Position - greenDiskPos).Magnitude
-                    if dist > 2.0 then
-                        Stats.Status = "🟢 Yeşil Halkaya Süzülünüyor..."
-                        tweenToGroundTarget(greenDiskPos, Config.NormalCoconutTweenSpeed or 100)
-                    end
+            local targetGreenDisk = nil
+            local diskType = ""
+            local diskTweenSpeed = 100
 
-                    hum:Move(Vector3.zero, false)
-                    hrp.Velocity = Vector3.zero
-                    Stats.Status = "🟢 Yeşil Halkada Coconut Bekleniyor..."
-
-                    if tick() - lastUiUpdate > 0.25 then
-                        lastUiUpdate = tick()
-                        updateStatusUI()
-                    end
-                    task.wait(0.03)
-                    continue
+            -- Kullanıcı isteği: Sadece Star Shower (küçük yeşil) süzülür!
+            if Config.StarShowerTweenEnabled then
+                local starDiskPos = getActiveStarShowerDisk(currentTargetField)
+                if starDiskPos then
+                    targetGreenDisk = starDiskPos
+                    diskType = "⭐ Star Shower (Küçük Yeşil)"
+                    diskTweenSpeed = Config.StarShowerTweenSpeed or 100
                 end
             end
 
+            -- Eğer star shower yoksa ve normal coconut tween'i açılmışsa:
+            if not targetGreenDisk and Config.FastTweenToNormalCoconut then
+                local cocoDiskPos = getActiveCoconutDisk(currentTargetField)
+                if cocoDiskPos then
+                    targetGreenDisk = cocoDiskPos
+                    diskType = "🥥 Normal Coconut (Büyük Yeşil)"
+                    diskTweenSpeed = Config.NormalCoconutTweenSpeed or 100
+                end
+            end
+
+            if targetGreenDisk then
+                local dist = (hrp.Position - targetGreenDisk).Magnitude
+                if dist > 2.0 then
+                    Stats.Status = diskType .. " Süzülünüyor..."
+                    tweenToGroundTarget(targetGreenDisk, diskTweenSpeed)
+                end
+
+                hum:Move(Vector3.zero, false)
+                hrp.Velocity = Vector3.zero
+                Stats.Status = diskType .. " Bekleniyor / Alınıyor..."
+
+                if tick() - lastUiUpdate > 0.25 then
+                    lastUiUpdate = tick()
+                    updateStatusUI()
+                end
+                task.wait(0.03)
+                continue -- Token toplamayı durdur, yıldızı al!
+            end
+
             -- ========================================================
-            -- 3. NORMAL VEYA COMBO ALANI TOKEN FARMING DÖNGÜSÜ
-            -- (SADECE COCONUT YOKKEN VE TWEEN BİTMİŞKEN ÇALIŞIR)
+            -- 3. NORMAL VEYA COMBO ALANI MERKEZ ODAKLI TOKEN FARMING
+            -- (HEP MERKEZDE GEZİNİR, KÖŞEYE GİDERSE TOKENİ ALIP HEMEN DÖNER)
             -- ========================================================
             if Config.LockToField and not amInsideField and fieldCenter then
                 if Config.AutoTweenToField then
@@ -1119,23 +1119,53 @@ task.spawn(function()
                 else
                     Stats.Status = currentTargetField .. " Alanına Yürünüyor..."
                     local walkTarget = Vector3.new(fieldCenter.X, hrp.Position.Y, fieldCenter.Z)
-                    hum:MoveTo(walkTarget)
+                    local dir = (walkTarget - hrp.Position)
+                    if dir.Magnitude > 0.1 then
+                        hum:Move(dir.Unit, false)
+                    end
                 end
             else
+                local distFromCenter = fieldCenter and (hrp.Position - fieldCenter).Magnitude or 0
+
+                -- Köşeye gittiyse ve o köşedeki yakın tokenler bittiyse -> HEMEN MERKEZE DÖN!
+                if fieldCenter and distFromCenter > 30 and not returningToCenter then
+                    local nearToken, _ = getBestToken(currentTargetField, 14)
+                    if not nearToken then
+                        returningToCenter = true
+                    end
+                end
+
+                if returningToCenter and fieldCenter then
+                    if distFromCenter <= 18 then
+                        returningToCenter = false
+                    else
+                        Stats.Status = "🌸 Köşe Tokenleri Alındı -> Merkeze Dönülüyor..."
+                        local dir = (fieldCenter - hrp.Position)
+                        hum:Move(Vector3.new(dir.X, 0, dir.Z).Unit, false)
+                        task.wait(0.02)
+                        continue
+                    end
+                end
+
+                -- Token Ara
                 local token, dist = getBestToken(currentTargetField)
 
                 if token and token.Parent == Workspace:FindFirstChild("Collectibles") then
                     Stats.CurrentTarget = token
-                    Stats.Status = string.format("Token'a Yürünüyor (%.1fm)", dist)
+                    Stats.Status = string.format("⚡ Token'a Koşuluyor (%.1fm)", dist)
 
-                    local walkTarget = Vector3.new(token.Position.X, hrp.Position.Y, token.Position.Z)
-                    hum:MoveTo(walkTarget)
+                    -- Direkt hız vektörü ile sıfır gecikmeli atılma
+                    local dir = (Vector3.new(token.Position.X, hrp.Position.Y, token.Position.Z) - hrp.Position)
+                    if dir.Magnitude > 0.1 then
+                        hum:Move(dir.Unit, false)
+                    end
 
+                    -- Takılma kontrolü
                     if lastPos then
                         local movedDist = (hrp.Position - lastPos).Magnitude
                         if movedDist < 0.5 then
                             stuckTimer = stuckTimer + 0.03
-                            if stuckTimer >= 1.0 and Config.AutoJump then
+                            if stuckTimer >= 0.8 and Config.AutoJump then
                                 hum.Jump = true
                                 stuckTimer = 0
                             end
@@ -1145,44 +1175,27 @@ task.spawn(function()
                     end
                     lastPos = hrp.Position
 
-                    -- Token'a ulaşıldı mı (Gecikmesiz hızlı toplama)
-                    if dist <= 5.5 then
+                    -- Token alma mesafesi: 6.5 stud (anında toplama)
+                    if dist <= 6.5 then
                         Stats.CollectedCount = Stats.CollectedCount + 1
                         Stats.Status = "Token Toplandı!"
                     end
                 else
-                    -- Alanda toplanacak token yok: Tarlada gezin (Wander/Roam)
+                    -- ALANDA TOPLANACAK TOKEN YOKSA:
+                    -- MERKEZDE ÇİÇEKLERİN ÜZERİNDE SÜREKLİ DÖNEREK DEVRİYE GEZ (ROAM)
                     Stats.CurrentTarget = nil
-                    if Config.RoamWhenNoTokens then
-                        local now = tick()
-                        if not wanderTarget or (hrp.Position - wanderTarget).Magnitude < 4 or (now - lastWanderTime) > 3.0 then
-                            wanderTarget = getRandomFieldPoint(currentTargetField)
-                            lastWanderTime = now
+                    if Config.RoamWhenNoTokens and fieldCenter then
+                        roamAngle = (roamAngle + 0.35) % (math.pi * 2)
+                        local offset = Vector3.new(math.cos(roamAngle) * (Config.CenterRoamRadius or 18), 0, math.sin(roamAngle) * (Config.CenterRoamRadius or 18))
+                        local roamPoint = fieldCenter + offset
+                        local dir = (roamPoint - hrp.Position)
+                        if dir.Magnitude > 0.1 then
+                            hum:Move(Vector3.new(dir.X, 0, dir.Z).Unit, false)
                         end
-
-                        if wanderTarget then
-                            Stats.Status = "🌸 Tarlada Geziniyor (Yeni Token Bekleniyor)..."
-                            local walkTarget = Vector3.new(wanderTarget.X, hrp.Position.Y, wanderTarget.Z)
-                            hum:MoveTo(walkTarget)
-                        else
-                            Stats.Status = "Yeni Tokenler Bekleniyor..."
-                            hum:Move(Vector3.zero, false)
-                        end
+                        Stats.Status = "🌸 Merkezde Çiçekler Üzerinde Geziniyor..."
                     else
-                        if fieldCenter then
-                            local distToCenter = (hrp.Position - fieldCenter).Magnitude
-                            if distToCenter > 15 then
-                                Stats.Status = "Tarla Merkezine Dönülüyor..."
-                                local walkTarget = Vector3.new(fieldCenter.X, hrp.Position.Y, fieldCenter.Z)
-                                hum:MoveTo(walkTarget)
-                            else
-                                Stats.Status = "Yeni Tokenler Bekleniyor..."
-                                hum:Move(Vector3.zero, false)
-                            end
-                        else
-                            Stats.Status = "Token Bekleniyor..."
-                            hum:Move(Vector3.zero, false)
-                        end
+                        Stats.Status = "Yeni Token Bekleniyor..."
+                        hum:Move(Vector3.zero, false)
                     end
                 end
             end
