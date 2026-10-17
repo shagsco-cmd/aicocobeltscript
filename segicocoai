@@ -1,0 +1,1168 @@
+-- ====================================================================
+-- Auto Farm Token Script - Bee Swarm Simulator
+-- UI: WindUI (Modern Dark Theme) with Field Selection, Direct Tween,
+-- Accurate Screen Buff Reading (rbxassetid://17354253598),
+-- and Smart Multi-Player Coconut Combo Juggling System (Field-Locked & Fail/100x Safe)
+-- With Configurable Combo Tween Speed (Matching Field Tween Speed)
+-- ====================================================================
+
+if getgenv().AutoFarmTokenCleanup then
+    pcall(getgenv().AutoFarmTokenCleanup)
+end
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- Detect and sort playable flower fields
+local FieldList = { "Mevcut Konum (Otomatik)" }
+local FlowerZonesFolder = Workspace:FindFirstChild("FlowerZones")
+
+if FlowerZonesFolder then
+    local rawFields = {}
+    for _, f in ipairs(FlowerZonesFolder:GetChildren()) do
+        if f:IsA("BasePart") then
+            -- Exclude out-of-bounds test fields
+            if math.abs(f.Position.X) < 1500 and math.abs(f.Position.Z) < 1500 then
+                table.insert(rawFields, f.Name)
+            end
+        end
+    end
+    table.sort(rawFields)
+    for _, name in ipairs(rawFields) do
+        table.insert(FieldList, name)
+    end
+end
+
+-- Detect current field of player
+local function getCurrentField()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp or not FlowerZonesFolder then return nil end
+
+    for _, field in ipairs(FlowerZonesFolder:GetChildren()) do
+        if field:IsA("BasePart") then
+            local localPos = field.CFrame:PointToObjectSpace(hrp.Position)
+            local half = field.Size / 2
+            if math.abs(localPos.X) <= half.X + 8 and math.abs(localPos.Z) <= half.Z + 8 and math.abs(localPos.Y) <= half.Y + 25 then
+                return field.Name
+            end
+        end
+    end
+    return nil
+end
+
+-- Helper: Get which field name a position belongs to
+local function getFieldNameAt(pos)
+    if not FlowerZonesFolder or not pos then return nil end
+    for _, field in ipairs(FlowerZonesFolder:GetChildren()) do
+        if field:IsA("BasePart") then
+            local localPos = field.CFrame:PointToObjectSpace(pos)
+            local half = field.Size / 2
+            if math.abs(localPos.X) <= (half.X + 8) and math.abs(localPos.Z) <= (half.Z + 8) then
+                return field.Name
+            end
+        end
+    end
+    return nil
+end
+
+local initialField = getCurrentField() or "Mevcut Konum (Otomatik)"
+
+-- State Management
+local Config = {
+    Enabled = false,
+    SelectedField = initialField,
+    LockToField = true,
+    AutoTweenToField = true,
+    TweenSpeed = 95,
+    MaxDistance = 120,
+    AutoJump = true,
+    CustomSpeedEnabled = false,
+    CustomSpeed = 40,
+    AnchorPosition = nil,
+    
+    -- Coconut Belt Passive Settings
+    CoconutBeltEnabled = true,
+    CoconutThreshold = 35,
+    ComboField = "Coconut Field",
+    ReturnToMainField = true,
+    ComboMovementMode = "Alana Gitme Hızıyla Tween", -- "Alana Gitme Hızıyla Tween", "Hızlı Tween (100 stud/s)", "Anında Işınlanma (TP)"
+    FastTweenToNormalCoconut = true, -- Yerdeki yeşil halkalara hızlı tween
+    NormalCoconutTweenSpeed = 100, -- Hızlı süzülme (100 stud/s)
+}
+
+local Stats = {
+    CollectedCount = 0,
+    NearbyTokens = 0,
+    Status = "Durduruldu (Kapalı)",
+    CurrentTarget = nil,
+    IsTweening = false,
+    CoconutProgress = 0,
+    ComboState = "NORMAL", -- "NORMAL", "FLYING_TO_COMBO", "IN_COMBO_FIELD", "WAITING_FOR_0X", "FLYING_TO_MAIN"
+}
+
+local activeTween = nil
+local noclipConnection = nil
+local activeBv = nil
+local activeBg = nil
+local tweenCancelRequested = false
+
+-- Coconut Combo & Juggling Tracking
+local comboWasActive = false
+local lastComboSeenTime = 0
+local highestStackInComboField = 0
+local comboTriggered = false
+local comboTriggerTime = 0
+local hasCaughtZeroX = false
+local maxComboSeen = 0
+
+-- Helper: Get Character Components
+local function getCharacterComponents()
+    local char = LocalPlayer.Character
+    if not char then return nil, nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    return hum, hrp
+end
+
+-- Helper: Get Center Position of Any Field
+local function getFieldCenter(fieldName)
+    if fieldName and fieldName ~= "Mevcut Konum (Otomatik)" and FlowerZonesFolder then
+        local fieldPart = FlowerZonesFolder:FindFirstChild(fieldName)
+        if fieldPart and fieldPart:IsA("BasePart") then
+            return fieldPart.Position
+        end
+    end
+    return Config.AnchorPosition
+end
+
+-- Helper: Check if a position is inside a specific field
+local function isInsideField(pos, fieldName)
+    if not fieldName or fieldName == "Mevcut Konum (Otomatik)" then
+        if Config.AnchorPosition then
+            return (pos - Config.AnchorPosition).Magnitude <= Config.MaxDistance
+        end
+        return true
+    end
+
+    if not FlowerZonesFolder then return true end
+    local fieldPart = FlowerZonesFolder:FindFirstChild(fieldName)
+    if not fieldPart or not fieldPart:IsA("BasePart") then return true end
+
+    local localPos = fieldPart.CFrame:PointToObjectSpace(pos)
+    local half = fieldPart.Size / 2
+    return math.abs(localPos.X) <= (half.X + 8) and math.abs(localPos.Z) <= (half.Z + 8)
+end
+
+-- GERÇEK CANLI EKRAN SAYACI OKUYUCUSU (TileGrid içindeki rbxassetid://17354253598 buff'ı)
+local function getLiveCoconutBeltStack()
+    local lp = Players.LocalPlayer
+    if not lp then return 0 end
+    local sg = lp.PlayerGui:FindFirstChild("ScreenGui")
+    if not sg then return 0 end
+
+    for _, tg in ipairs(sg:GetChildren()) do
+        if tg.Name == "TileGrid" then
+            for _, tile in ipairs(tg:GetChildren()) do
+                local icon = tile:FindFirstChildWhichIsA("ImageLabel", true) or tile:FindFirstChildWhichIsA("ImageButton", true)
+                if icon and icon.Image and string.find(tostring(icon.Image), "17354253598") then
+                    local label = tile:FindFirstChildWhichIsA("TextLabel", true)
+                    if label and label.Text and label.Text ~= "" then
+                        local num = tonumber(label.Text:match("%d+"))
+                        if num then
+                            return num
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return 0
+end
+
+-- Helper: Scan for active combo coconut disks and differentiate between our field vs other fields
+local function getComboCoconutsInfo(ourField)
+    local particles = Workspace:FindFirstChild("Particles")
+    if not particles then
+        return nil, nil, false, 0
+    end
+
+    local ourCombo = nil
+    local otherCombo = nil
+    local anyComboExists = false
+    local maxPoints = 0
+
+    for _, obj in ipairs(particles:GetChildren()) do
+        if obj:IsA("BasePart") and (obj.Name == "WarningDisk" or obj.Name == "AreaRing") then
+            local guiAttach = obj:FindFirstChild("GuiAttach") or obj:FindFirstChildWhichIsA("BillboardGui", true)
+            if guiAttach then
+                local textLabel = guiAttach:FindFirstChildWhichIsA("TextLabel", true)
+                if textLabel and textLabel.Text and (textLabel.Text:find("🥥") or textLabel.Text:find("x") or textLabel.Text:find("0")) then
+                    anyComboExists = true
+                    local points = tonumber(textLabel.Text:match("%d+")) or 0
+                    if points > maxPoints then
+                        maxPoints = points
+                    end
+
+                    local fieldName = getFieldNameAt(obj.Position)
+                    local comboData = {
+                        Position = obj.Position,
+                        Text = textLabel.Text,
+                        Field = fieldName,
+                        Points = points,
+                    }
+
+                    local inOurField = false
+                    if ourField and ourField ~= "Mevcut Konum (Otomatik)" then
+                        inOurField = isInsideField(obj.Position, ourField)
+                    elseif ourField == "Mevcut Konum (Otomatik)" then
+                        local hum, hrp = getCharacterComponents()
+                        if hrp then
+                            local myField = getCurrentField()
+                            if myField then
+                                inOurField = isInsideField(obj.Position, myField)
+                            else
+                                inOurField = (obj.Position - hrp.Position).Magnitude <= Config.MaxDistance
+                            end
+                        end
+                    end
+
+                    if inOurField then
+                        ourCombo = comboData
+                    else
+                        otherCombo = comboData
+                    end
+                end
+            end
+        end
+    end
+
+    return ourCombo, otherCombo, anyComboExists, maxPoints
+end
+
+-- Helper: Find Active Green Warning Disks on the GROUND ONLY inside active field!
+local function getActiveGreenWarningDisk(currentField)
+    local hum, hrp = getCharacterComponents()
+    if not hrp then return nil end
+
+    local particles = Workspace:FindFirstChild("Particles")
+    if not particles then return nil end
+
+    local bestPos = nil
+    local shortestDist = math.huge
+
+    for _, obj in ipairs(particles:GetChildren()) do
+        if obj:IsA("BasePart") and (obj.Name == "WarningDisk" or (obj.Name == "AreaRing" and obj.Color.G > 0.65)) then
+            local guiAttach = obj:FindFirstChild("GuiAttach") or obj:FindFirstChildWhichIsA("BillboardGui", true)
+            local isCombo = false
+            if guiAttach then
+                local textLabel = guiAttach:FindFirstChildWhichIsA("TextLabel", true)
+                if textLabel and textLabel.Text and (textLabel.Text:find("🥥") or textLabel.Text:find("x") or textLabel.Text:find("0")) then
+                    isCombo = true
+                end
+            end
+
+            if not isCombo then
+                local inField = true
+                if Config.LockToField and currentField then
+                    inField = isInsideField(obj.Position, currentField)
+                end
+
+                if inField then
+                    local dist = (obj.Position - hrp.Position).Magnitude
+                    if dist < shortestDist and dist <= Config.MaxDistance then
+                        shortestDist = dist
+                        bestPos = obj.Position
+                    end
+                end
+            end
+        end
+    end
+
+    return bestPos
+end
+
+-- Stop Active Tween cleanly
+local function stopTween()
+    tweenCancelRequested = true
+    if activeTween then
+        pcall(function() activeTween:Cancel() end)
+        activeTween = nil
+    end
+    if activeBv then
+        pcall(function() activeBv:Destroy() end)
+        activeBv = nil
+    end
+    if activeBg then
+        pcall(function() activeBg:Destroy() end)
+        activeBg = nil
+    end
+    if noclipConnection then
+        pcall(function() noclipConnection:Disconnect() end)
+        noclipConnection = nil
+    end
+
+    local hum, hrp = getCharacterComponents()
+    if hum then
+        pcall(function()
+            hum:Move(Vector3.zero, false)
+            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+            hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, true)
+        end)
+    end
+    if hrp then
+        hrp.Velocity = Vector3.zero
+    end
+
+    Stats.IsTweening = false
+end
+
+-- Direct Linear Tween for Field Transitions
+local function safeTweenTo(targetPos, onComplete)
+    stopTween()
+    tweenCancelRequested = false
+
+    local hum, hrp = getCharacterComponents()
+    if not hum or not hrp or not targetPos then return end
+
+    local startPos = hrp.Position
+    local endPos = targetPos + Vector3.new(0, 3.5, 0)
+    local totalDistance = (startPos - endPos).Magnitude
+
+    if totalDistance < 5 then
+        if onComplete then onComplete() end
+        return
+    end
+
+    Stats.IsTweening = true
+    Stats.Status = string.format("Alana Gidiliyor (%.0f stud)...", totalDistance)
+
+    pcall(function()
+        hum:Move(Vector3.zero, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
+        hum:ChangeState(Enum.HumanoidStateType.Running)
+    end)
+
+    activeBv = Instance.new("BodyVelocity")
+    activeBv.Name = "DirectAntiGravity"
+    activeBv.Velocity = Vector3.zero
+    activeBv.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    activeBv.Parent = hrp
+
+    local dir = (endPos - startPos)
+    local flatDir = Vector3.new(dir.X, 0, dir.Z)
+    if flatDir.Magnitude < 0.1 then
+        flatDir = hrp.CFrame.LookVector
+    else
+        flatDir = flatDir.Unit
+    end
+
+    activeBg = Instance.new("BodyGyro")
+    activeBg.Name = "DirectUprightGyro"
+    activeBg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+    activeBg.P = 10000
+    activeBg.CFrame = CFrame.lookAt(startPos, startPos + flatDir)
+    activeBg.Parent = hrp
+
+    noclipConnection = RunService.Stepped:Connect(function()
+        if not Stats.IsTweening or tweenCancelRequested then
+            if noclipConnection then noclipConnection:Disconnect() end
+            return
+        end
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+        end
+    end)
+
+    local speed = Config.TweenSpeed or 95
+    local duration = totalDistance / speed
+    local targetCF = CFrame.lookAt(endPos, endPos + flatDir)
+
+    task.spawn(function()
+        activeTween = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = targetCF })
+        activeTween:Play()
+        activeTween.Completed:Wait()
+
+        if not tweenCancelRequested then
+            Stats.Status = "Alana Ulaşıldı!"
+            stopTween()
+            if onComplete then
+                onComplete()
+            end
+        else
+            stopTween()
+        end
+    end)
+end
+
+-- Smooth Ground Level Linear Tween to Ground Disks
+local function tweenToGroundTarget(targetPos, customSpeed)
+    local hum, hrp = getCharacterComponents()
+    if not hum or not hrp or not targetPos then return end
+
+    local startPos = hrp.Position
+    local endPos = Vector3.new(targetPos.X, hrp.Position.Y, targetPos.Z)
+    local dist = (startPos - endPos).Magnitude
+    if dist < 2.0 then
+        hum:Move(Vector3.zero, false)
+        hrp.Velocity = Vector3.zero
+        return
+    end
+
+    Stats.IsTweening = true
+
+    pcall(function()
+        hum:Move(Vector3.zero, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Freefall, false)
+        hum:ChangeState(Enum.HumanoidStateType.Running)
+    end)
+
+    local bv = Instance.new("BodyVelocity")
+    bv.Velocity = Vector3.zero
+    bv.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    bv.Parent = hrp
+
+    local dir = (endPos - startPos)
+    local flatDir = Vector3.new(dir.X, 0, dir.Z)
+    if flatDir.Magnitude < 0.1 then flatDir = hrp.CFrame.LookVector else flatDir = flatDir.Unit end
+    local targetCF = CFrame.lookAt(endPos, endPos + flatDir)
+
+    local speed = customSpeed or Config.TweenSpeed or 95
+    local duration = math.clamp(dist / speed, 0.04, 3.5)
+
+    local tw = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Linear), { CFrame = targetCF })
+    tw:Play()
+    tw.Completed:Wait()
+
+    bv:Destroy()
+    hrp.Velocity = Vector3.zero
+    hum:Move(Vector3.zero, false)
+    Stats.IsTweening = false
+end
+
+-- Load WindUI
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+
+local Window = WindUI:CreateWindow({
+    Title = "Auto Farm Token",
+    Icon = "coins",
+    Author = "Bee Swarm Simulator",
+    Folder = "AutoFarmToken_BSS",
+    Size = UDim2.fromOffset(530, 460),
+    Transparent = true,
+    Theme = "Dark",
+    Resizable = true,
+    ToggleKey = Enum.KeyCode.RightControl,
+})
+
+-- Tabs
+local FarmTab = Window:Tab({
+    Title = "Farming",
+    Icon = "play",
+})
+
+local CocoTab = Window:Tab({
+    Title = "Coconut Belt",
+    Icon = "circle-dot",
+})
+
+local CharTab = Window:Tab({
+    Title = "Karakter",
+    Icon = "user",
+})
+
+local InfoTab = Window:Tab({
+    Title = "Hakkında",
+    Icon = "info",
+})
+
+-- Status display (FarmTab)
+local StatusParagraph = FarmTab:Paragraph({
+    Title = "Durum Paneli",
+    Desc = string.format("Seçili Alan: %s\nDurum: Durduruldu (Kapalı)\nToplanan: 0 | Alandaki Token: 0", Config.SelectedField),
+})
+
+-- Status display (CocoTab)
+local CocoStatusParagraph = CocoTab:Paragraph({
+    Title = "Coconut Belt Takip Paneli",
+    Desc = "Coconut Sayacı: 0 / 40\nDurum: Beklemede",
+})
+
+local function updateStatusUI()
+    local inComboFieldMode = (Stats.ComboState == "IN_COMBO_FIELD" or Stats.ComboState == "WAITING_FOR_0X")
+    local currentActiveField = (inComboFieldMode and Config.ComboField) or Config.SelectedField
+    local descText = string.format(
+        "Aktif Alan: %s\nDurum: %s\nToplanan Token: %d | Alandaki Token: %d",
+        currentActiveField,
+        Stats.Status,
+        Stats.CollectedCount,
+        Stats.NearbyTokens
+    )
+    pcall(function()
+        StatusParagraph:SetDesc(descText)
+    end)
+
+    local comboInfo = (maxComboSeen > 0 and string.format(" (Max: %dx)", maxComboSeen)) or ""
+    local cocoText = string.format(
+        "Coconut Belt Sayacı: %d / 40 (Eşik: %d)%s\nMod: %s\nHareket: %s\n0x Durumu: %s\nDurum: %s",
+        Stats.CoconutProgress,
+        Config.CoconutThreshold,
+        comboInfo,
+        Stats.ComboState,
+        Config.ComboMovementMode,
+        (hasCaughtZeroX and "Alındı ✅" or (comboTriggered and "0x Bekleniyor 🔥" or "Beklemede")),
+        Stats.Status
+    )
+    pcall(function()
+        CocoStatusParagraph:SetDesc(cocoText)
+    end)
+end
+
+-- 1. FarmTab Elements
+FarmTab:Dropdown({
+    Title = "Asıl Farming Alanı (Field)",
+    Desc = "Normalde kasılmak istediğiniz çiçek tarlasını seçin",
+    Values = FieldList,
+    Value = Config.SelectedField,
+    SearchBarEnabled = true,
+    Callback = function(selected)
+        Config.SelectedField = selected
+        local _, hrp = getCharacterComponents()
+        if selected == "Mevcut Konum (Otomatik)" then
+            if hrp then
+                Config.AnchorPosition = hrp.Position
+            end
+        else
+            local center = getFieldCenter(selected)
+            if center then
+                Config.AnchorPosition = center
+            end
+        end
+        updateStatusUI()
+        WindUI:Notify({
+            Title = "Alan Değiştirildi",
+            Content = "Yeni asıl alan: " .. selected,
+            Duration = 2,
+            Icon = "map-pin",
+        })
+    end,
+})
+
+FarmTab:Button({
+    Title = "Seçilen Alana Git (Direkt Tween)",
+    Desc = "Doğrudan seçili alana düz çizgide süzülür",
+    Callback = function()
+        local center = getFieldCenter(Config.SelectedField)
+        if center then
+            safeTweenTo(center)
+            WindUI:Notify({
+                Title = "Tween Başlatıldı",
+                Content = Config.SelectedField .. " alanına doğrudan süzülüyor...",
+                Duration = 2,
+                Icon = "wind",
+            })
+        end
+    end,
+})
+
+FarmTab:Button({
+    Title = "Tween'i Durdur / İptal Et",
+    Desc = "Aktif süzülme hareketini anında iptal eder",
+    Callback = function()
+        stopTween()
+        Stats.Status = "Tween iptal edildi."
+        updateStatusUI()
+        WindUI:Notify({
+            Title = "Tween İptal",
+            Content = "Tween hareketi durduruldu.",
+            Duration = 2,
+            Icon = "circle-stop",
+        })
+    end,
+})
+
+FarmTab:Toggle({
+    Title = "Auto Farm Token",
+    Desc = "Tokenlere otomatik yürür ve toplar",
+    Value = false,
+    Callback = function(state)
+        Config.Enabled = state
+        local hum, hrp = getCharacterComponents()
+
+        if state then
+            if Config.SelectedField == "Mevcut Konum (Otomatik)" and hrp then
+                Config.AnchorPosition = hrp.Position
+            else
+                Config.AnchorPosition = getFieldCenter(Config.SelectedField) or (hrp and hrp.Position)
+            end
+            Stats.Status = "Farming Başlatıldı..."
+            WindUI:Notify({
+                Title = "Auto Farm",
+                Content = Config.SelectedField .. " alanında farming aktif!",
+                Duration = 2,
+                Icon = "play",
+            })
+        else
+            stopTween()
+            Stats.Status = "Durduruldu (Kapalı)"
+            Stats.CurrentTarget = nil
+            Stats.ComboState = "NORMAL"
+            comboWasActive = false
+            comboTriggered = false
+            comboTriggerTime = 0
+            highestStackInComboField = 0
+            hasCaughtZeroX = false
+            maxComboSeen = 0
+            if hum then
+                hum:Move(Vector3.zero, false)
+            end
+            WindUI:Notify({
+                Title = "Auto Farm",
+                Content = "Farming durduruldu.",
+                Duration = 2,
+                Icon = "circle-alert",
+            })
+        end
+        updateStatusUI()
+    end,
+})
+
+FarmTab:Toggle({
+    Title = "Sadece Seçili Alanda Kal",
+    Desc = "Tarladan dışarı çıkmaz, tarlanın dışındaki tokenleri almaz",
+    Value = true,
+    Callback = function(state)
+        Config.LockToField = state
+    end,
+})
+
+FarmTab:Toggle({
+    Title = "Alandan Uzaktaysa Otomatik Tween",
+    Desc = "Farklı bir tarlaya geçtiğinizde oraya doğrudan tween ile uçar",
+    Value = true,
+    Callback = function(state)
+        Config.AutoTweenToField = state
+    end,
+})
+
+FarmTab:Slider({
+    Title = "Arama Mesafesi (Mevcut Konum için)",
+    Desc = "Mevcut konum modundayken arama yarıçapı",
+    Value = { Min = 30, Max = 400, Default = 120 },
+    Step = 5,
+    Callback = function(val)
+        Config.MaxDistance = val
+    end,
+})
+
+FarmTab:Toggle({
+    Title = "Takılma Önleyici Zıplama",
+    Desc = "Karakter bir engele takılırsa otomatik zıplar",
+    Value = true,
+    Callback = function(state)
+        Config.AutoJump = state
+    end,
+})
+
+-- 2. CocoTab (Coconut Belt Pasif Sistemi) Elements
+CocoTab:Toggle({
+    Title = "Coconut Belt Oto Geçiş & Combo Paslaşma",
+    Desc = "Sayaç belirlenen sayıya ulaştığında combo tarlasına uçar, comboyu yakalar ve bitince geri döner",
+    Value = true,
+    Callback = function(state)
+        Config.CoconutBeltEnabled = state
+    end,
+})
+
+CocoTab:Dropdown({
+    Title = "Combo Coconut'a Gitme Hızı / Şekli",
+    Desc = "Düşen combo halkasına nasıl ve hangi hızla gidilsin?",
+    Values = { "Alana Gitme Hızıyla Tween (Önerilen)", "Hızlı Tween (100 stud/s)", "Anında Işınlanma (TP)" },
+    Value = "Alana Gitme Hızıyla Tween (Önerilen)",
+    Callback = function(selected)
+        if selected:find("Alana Gitme") then
+            Config.ComboMovementMode = "Alana Gitme Hızıyla Tween"
+        elseif selected:find("Hızlı") or selected:find("Ultra") then
+            Config.ComboMovementMode = "Hızlı Tween (100 stud/s)"
+        else
+            Config.ComboMovementMode = "Anında Işınlanma (TP)"
+        end
+        WindUI:Notify({
+            Title = "Combo Hareket Modu",
+            Content = "Yeni mod: " .. Config.ComboMovementMode,
+            Duration = 2,
+            Icon = "wind",
+        })
+    end,
+})
+
+CocoTab:Toggle({
+    Title = "Yerdeki Yeşil Halkalara Hızlı Tween",
+    Desc = "Tarlan içerisindeki yeşil uyarı halkalarına hızlı süzülür",
+    Value = true,
+    Callback = function(state)
+        Config.FastTweenToNormalCoconut = state
+    end,
+})
+
+CocoTab:Slider({
+    Title = "Yeşil Halka Tween Hızı (Stud/s)",
+    Desc = "Yerdeki normal yeşil halkalara yetişme hızı (Varsayılan: 100)",
+    Value = { Min = 40, Max = 300, Default = 100 },
+    Step = 5,
+    Callback = function(val)
+        Config.NormalCoconutTweenSpeed = val
+    end,
+})
+
+CocoTab:Dropdown({
+    Title = "Combo Tarlası (Hedef Tarla)",
+    Desc = "Coconut combolarının toplanacağı alan (Genelde Sunflower veya Coconut Field)",
+    Values = FieldList,
+    Value = Config.ComboField,
+    SearchBarEnabled = true,
+    Callback = function(selected)
+        Config.ComboField = selected
+        WindUI:Notify({
+            Title = "Combo Alanı",
+            Content = "Hedef combo alanı: " .. selected,
+            Duration = 2,
+            Icon = "circle-dot",
+        })
+    end,
+})
+
+CocoTab:Slider({
+    Title = "Geçiş Eşiği (Sayaç Değeri)",
+    Desc = "Ekrandaki Coconut Belt buff'ı kaç olunca combo tarlasına geçilsin? (Önerilen: 35)",
+    Value = { Min = 20, Max = 39, Default = 35 },
+    Step = 1,
+    Callback = function(val)
+        Config.CoconutThreshold = val
+    end,
+})
+
+CocoTab:Toggle({
+    Title = "Combo Bittiğinde (Fail / 100x) Asıl Alana Dön",
+    Desc = "Combo başka alana gittiğinde sabırla bekler; sadece combo tamamen bittiğinde asıl tarlaya döner",
+    Value = true,
+    Callback = function(state)
+        Config.ReturnToMainField = state
+    end,
+})
+
+-- 3. Character Tab Elements
+CharTab:Slider({
+    Title = "Alana Gitme & Tarlalar Arası Tween Hızı (Stud/s)",
+    Desc = "Tarlalar arası ve combo coconut'a süzülme hızı (Varsayılan: 95)",
+    Value = { Min = 40, Max = 220, Default = 95 },
+    Step = 5,
+    Callback = function(val)
+        Config.TweenSpeed = val
+    end,
+})
+
+CharTab:Toggle({
+    Title = "Özel Yürüme Hızı",
+    Desc = "Karakterin token toplama hızını ayarlanan değerde tutar",
+    Value = false,
+    Callback = function(state)
+        Config.CustomSpeedEnabled = state
+    end,
+})
+
+CharTab:Slider({
+    Title = "Yürüme Hızı Değeri",
+    Desc = "Tokenlere doğru yürürken kullanılacak hız",
+    Value = { Min = 16, Max = 100, Default = 40 },
+    Step = 2,
+    Callback = function(val)
+        Config.CustomSpeed = val
+    end,
+})
+
+-- 4. Info Tab Elements
+InfoTab:Paragraph({
+    Title = "Dengeli Tween & Güvenli Paslaşma",
+    Desc = "• Combo coconut halkalarına ani ışınlanma yerine, alana gitme hızıyla (" .. tostring(Config.TweenSpeed) .. " stud/s) düz çizgide süzülür.\n• Başka tarladaki combo halkasına asla gitmez, kendi tarlasında bekler.\n• Combo bitene (100x veya fail) kadar tarladan ayrılmaz.",
+})
+
+-- Best Token Finder for current active field
+local function getBestToken(targetField)
+    local hum, hrp = getCharacterComponents()
+    if not hum or not hrp then return nil, 0 end
+
+    local collectibles = Workspace:FindFirstChild("Collectibles")
+    if not collectibles then return nil, 0 end
+
+    local bestToken = nil
+    local shortestDist = math.huge
+    local nearbyCount = 0
+
+    for _, c in ipairs(collectibles:GetChildren()) do
+        if c:IsA("BasePart") then
+            local frontDecal = c:FindFirstChild("FrontDecal")
+            local isFaded = c.Transparency >= 0.6 or (frontDecal and frontDecal.Transparency >= 0.6)
+
+            if not isFaded then
+                local inField = true
+                if Config.LockToField then
+                    inField = isInsideField(c.Position, targetField)
+                end
+
+                if inField then
+                    nearbyCount = nearbyCount + 1
+                    local distToPlayer = (c.Position - hrp.Position).Magnitude
+                    if distToPlayer < shortestDist then
+                        shortestDist = distToPlayer
+                        bestToken = c
+                    end
+                end
+            end
+        end
+    end
+
+    Stats.NearbyTokens = nearbyCount
+    return bestToken, shortestDist
+end
+
+-- Main Automation Loop
+local running = true
+local lastPos = nil
+local stuckTimer = 0
+local lastUiUpdate = 0
+
+task.spawn(function()
+    while running do
+        task.wait(0.025)
+
+        local hum, hrp = getCharacterComponents()
+
+        -- Tween sırasında token toplamayı ve yürümeyi tamamen durdur
+        if Stats.IsTweening then
+            if hum then
+                hum:Move(Vector3.zero, false)
+            end
+            if tick() - lastUiUpdate > 0.3 then
+                lastUiUpdate = tick()
+                updateStatusUI()
+            end
+            continue
+        end
+
+        -- Hız Ayarlaması (Combo veya tween sırasında değilken)
+        if hum and Config.CustomSpeedEnabled and not comboWasActive then
+            hum.WalkSpeed = Config.CustomSpeed
+        end
+
+        if Config.Enabled and hum and hrp and hum.Health > 0 then
+            -- DOĞRUDAN EKRANDAKİ BUFF'IN ÜZERİNDEKİ SAYACI OKU (Örn: 20, 34, 40)
+            local currentBeltStack = getLiveCoconutBeltStack()
+            Stats.CoconutProgress = currentBeltStack
+
+            local inComboFieldMode = (Stats.ComboState == "IN_COMBO_FIELD" or Stats.ComboState == "WAITING_FOR_0X")
+            local currentTargetField = (inComboFieldMode and Config.ComboField) or Config.SelectedField
+            local fieldCenter = getFieldCenter(currentTargetField)
+            local amInsideField = isInsideField(hrp.Position, currentTargetField)
+
+            -- Combo tarlası içindeyken sayaç takibi
+            if inComboFieldMode then
+                if currentBeltStack > highestStackInComboField then
+                    highestStackInComboField = currentBeltStack
+                end
+
+                -- Eğer 35+ stack görüldükten sonra sayaç 0 olduysa veya 40'a ulaştıysa COMBO TETİKLENMİŞTİR:
+                if (highestStackInComboField >= Config.CoconutThreshold and currentBeltStack == 0 and not comboWasActive) or currentBeltStack >= 40 then
+                    if not comboTriggered then
+                        comboTriggered = true
+                        comboTriggerTime = tick()
+                        Stats.ComboState = "WAITING_FOR_0X"
+                    end
+                end
+            end
+
+            -- ========================================================
+            -- 1. COCONUT COMBO & ÇOKLU TARLA PASLAŞMA SİSTEMİ
+            -- ========================================================
+            local ourCombo, otherCombo, anyComboExists, maxPoints = getComboCoconutsInfo(currentTargetField)
+            if maxPoints > maxComboSeen then
+                maxComboSeen = maxPoints
+            end
+
+            if Config.CoconutBeltEnabled and anyComboExists then
+                comboWasActive = true
+                comboTriggered = false
+                lastComboSeenTime = tick()
+
+                if ourCombo then
+                    -- 1A: Coconut BİZİM TARLAMIZDA! Yakala ve sabit kal!
+                    if ourCombo.Points == 0 then
+                        hasCaughtZeroX = true
+                        Stats.Status = "⚡ 🥥 0x Bizim Alanda - Süzülünüyor & Bekleniyor!"
+                    else
+                        Stats.Status = string.format("⚡ 🥥 %s Bizim Alanda (%s) - Süzülünüyor!", ourCombo.Text, currentTargetField)
+                    end
+
+                    -- HAREKET ŞEKLİ: Kullanıcının isteği doğrultusunda Alana Gitme Tween Hızı ile süzülür
+                    if Config.ComboMovementMode == "Anında Işınlanma (TP)" then
+                        hrp.CFrame = CFrame.new(ourCombo.Position.X, hrp.Position.Y, ourCombo.Position.Z)
+                        hrp.Velocity = Vector3.zero
+                        hum:Move(Vector3.zero, false)
+                    elseif Config.ComboMovementMode == "Hızlı Tween (100 stud/s)" or Config.ComboMovementMode == "Ultra Hızlı Tween" then
+                        tweenToGroundTarget(ourCombo.Position, Config.NormalCoconutTweenSpeed or 100)
+                        hum:Move(Vector3.zero, false)
+                    else
+                        -- Varsayılan: Alana gitme tween hızıyla birebir aynı (Config.TweenSpeed, örn: 95)
+                        tweenToGroundTarget(ourCombo.Position, Config.TweenSpeed or 95)
+                        hum:Move(Vector3.zero, false)
+                    end
+
+                    if tick() - lastUiUpdate > 0.25 then
+                        lastUiUpdate = tick()
+                        updateStatusUI()
+                    end
+                    task.wait(0.03)
+                    continue -- KESİNLİKLE TOKEN TOPLAMA, HALKADA BEKLE!
+
+                elseif otherCombo then
+                    -- 1B: Coconut BAŞKA ALANDA (Örn: Diğer hesap Pepper'da, coconut oraya gitti)!
+                    -- ASLA ORADAKİ COCONUTA IŞINLANMA! KENDİ TARLANDAN AYRILMA, SIRANI BEKLE!
+                    hum:Move(Vector3.zero, false)
+                    hrp.Velocity = Vector3.zero
+                    Stats.Status = string.format("🥥 Coconut %s Alanında (%s) | Bizim Tarlada Sıra Bekleniyor...", otherCombo.Field or "Başka Alanda", otherCombo.Text)
+
+                    if tick() - lastUiUpdate > 0.25 then
+                        lastUiUpdate = tick()
+                        updateStatusUI()
+                    end
+                    task.wait(0.03)
+                    continue -- ASIL ALANA DÖNME, KENDİ ALANINDA SABİT BEKLE!
+                end
+
+            elseif Config.CoconutBeltEnabled and comboTriggered and not comboWasActive then
+                -- 40. Coconut tüketildi ve combo tetiklendi: 0x doğana kadar tarladan ayrılma!
+                local waitElapsed = tick() - comboTriggerTime
+                if waitElapsed < 12.0 then
+                    Stats.Status = string.format("🔥 Combo Tetiklendi! 🥥 0x Bekleniyor... (%.1fs)", 12.0 - waitElapsed)
+                    hum:Move(Vector3.zero, false)
+                    hrp.Velocity = Vector3.zero
+                    task.wait(0.03)
+                    if tick() - lastUiUpdate > 0.25 then
+                        lastUiUpdate = tick()
+                        updateStatusUI()
+                    end
+                    continue -- 0X ÇIKANA KADAR TARLADAN AYRILMA, TOKEN ARAMA!
+                else
+                    comboTriggered = false
+                end
+
+            elseif Config.CoconutBeltEnabled and comboWasActive then
+                -- Coconut havada paslaşılıyor veya son coconut alındı.
+                -- İki tarla arası uçuş ve pas payı için 7.5 saniye bekle:
+                local timeSinceCombo = tick() - lastComboSeenTime
+
+                if timeSinceCombo < 7.5 and maxComboSeen < 100 then
+                    Stats.Status = string.format("🥥 Sonraki Pas / Combo Bekleniyor... (%.1fs)", 7.5 - timeSinceCombo)
+                    hum:Move(Vector3.zero, false)
+                    hrp.Velocity = Vector3.zero
+                    task.wait(0.03)
+                    if tick() - lastUiUpdate > 0.25 then
+                        lastUiUpdate = tick()
+                        updateStatusUI()
+                    end
+                    continue -- YENİ COMBO COCONUT GELİRSE YAKALAMAK İÇİN ALANDA SABİT KAL!
+                else
+                    -- 7.5 saniye geçti ve başka combo coconut gelmedi (FAIL oldu) VEYA 100x tamamlandı!
+                    local finishReason = (maxComboSeen >= 100 and "🏆 100x Max Combo Tamamlandı!") or string.format("✅ Combo Bitti (%dx'de Fail Oldu)!", maxComboSeen)
+                    Stats.Status = finishReason .. " Asıl Alana Dönülüyor..."
+                    updateStatusUI()
+
+                    comboWasActive = false
+                    comboTriggered = false
+                    comboTriggerTime = 0
+                    highestStackInComboField = 0
+                    maxComboSeen = 0
+
+                    if Config.ReturnToMainField and Config.SelectedField then
+                        local mainCenter = getFieldCenter(Config.SelectedField)
+                        if mainCenter then
+                            Stats.ComboState = "FLYING_TO_MAIN"
+                            safeTweenTo(mainCenter, function()
+                                Stats.ComboState = "NORMAL"
+                                Stats.Status = "Asıl Alana Dönüldü, Farming Devam Ediyor"
+                                hasCaughtZeroX = false
+                            end)
+                            continue
+                        end
+                    end
+                    Stats.ComboState = "NORMAL"
+                    hasCaughtZeroX = false
+                end
+
+            elseif Config.CoconutBeltEnabled and Stats.ComboState == "NORMAL" and currentBeltStack >= Config.CoconutThreshold then
+                -- SADECE VE SADECE EKRANDAKİ SAYI EŞİĞE (Örn: 35) ULAŞTIĞINDA GEÇİŞ YAP!
+                if Config.ComboField and Config.ComboField ~= Config.SelectedField then
+                    local comboCenter = getFieldCenter(Config.ComboField)
+                    local amInsideCombo = isInsideField(hrp.Position, Config.ComboField)
+
+                    if not amInsideCombo and comboCenter then
+                        Stats.ComboState = "FLYING_TO_COMBO"
+                        highestStackInComboField = currentBeltStack
+                        comboTriggered = false
+                        comboWasActive = false
+                        hasCaughtZeroX = false
+                        maxComboSeen = 0
+                        Stats.Status = string.format("Sayaç %d/40! %s Alanına Gidiliyor...", currentBeltStack, Config.ComboField)
+                        updateStatusUI()
+
+                        safeTweenTo(comboCenter, function()
+                            Stats.ComboState = "IN_COMBO_FIELD"
+                            Stats.Status = Config.ComboField .. " Alanında 40. Coconut Bekleniyor..."
+                        end)
+                        continue
+                    else
+                        Stats.ComboState = "IN_COMBO_FIELD"
+                        highestStackInComboField = currentBeltStack
+                    end
+                end
+            end
+
+            -- ========================================================
+            -- 2. SADECE BULUNDUĞUMUZ TARLADAKİ YEŞİL HALKALARA TWEEN
+            -- ========================================================
+            if Config.FastTweenToNormalCoconut then
+                local greenDiskPos = getActiveGreenWarningDisk(currentTargetField)
+                if greenDiskPos then
+                    local dist = (hrp.Position - greenDiskPos).Magnitude
+                    if dist > 2.0 then
+                        Stats.Status = "🟢 Yeşil Halkaya Süzülünüyor..."
+                        tweenToGroundTarget(greenDiskPos, Config.NormalCoconutTweenSpeed or 100)
+                    end
+
+                    hum:Move(Vector3.zero, false)
+                    hrp.Velocity = Vector3.zero
+                    Stats.Status = "🟢 Yeşil Halkada Coconut Bekleniyor..."
+
+                    if tick() - lastUiUpdate > 0.25 then
+                        lastUiUpdate = tick()
+                        updateStatusUI()
+                    end
+                    task.wait(0.03)
+                    continue
+                end
+            end
+
+            -- ========================================================
+            -- 3. NORMAL VEYA COMBO ALANI TOKEN FARMING DÖNGÜSÜ
+            -- (SADECE COCONUT YOKKEN VE TWEEN BİTMİŞKEN ÇALIŞIR)
+            -- ========================================================
+            if Config.LockToField and not amInsideField and fieldCenter then
+                if Config.AutoTweenToField then
+                    safeTweenTo(fieldCenter)
+                    continue
+                else
+                    Stats.Status = currentTargetField .. " Alanına Yürünüyor..."
+                    local walkTarget = Vector3.new(fieldCenter.X, hrp.Position.Y, fieldCenter.Z)
+                    hum:MoveTo(walkTarget)
+                end
+            else
+                local token, dist = getBestToken(currentTargetField)
+
+                if token and token.Parent == Workspace:FindFirstChild("Collectibles") then
+                    Stats.CurrentTarget = token
+                    Stats.Status = string.format("Token'a Yürünüyor (%.1fm)", dist)
+
+                    local walkTarget = Vector3.new(token.Position.X, hrp.Position.Y, token.Position.Z)
+                    hum:MoveTo(walkTarget)
+
+                    if lastPos then
+                        local movedDist = (hrp.Position - lastPos).Magnitude
+                        if movedDist < 0.5 then
+                            stuckTimer = stuckTimer + 0.03
+                            if stuckTimer >= 1.0 and Config.AutoJump then
+                                hum.Jump = true
+                                stuckTimer = 0
+                            end
+                        else
+                            stuckTimer = 0
+                        end
+                    end
+                    lastPos = hrp.Position
+
+                    if dist <= 4.0 then
+                        Stats.CollectedCount = Stats.CollectedCount + 1
+                        Stats.Status = "Token Toplandı!"
+                        task.wait(0.03)
+                    end
+                else
+                    Stats.CurrentTarget = nil
+                    if fieldCenter then
+                        local distToCenter = (hrp.Position - fieldCenter).Magnitude
+                        if distToCenter > 15 then
+                            Stats.Status = "Tarla Merkezine Dönülüyor..."
+                            local walkTarget = Vector3.new(fieldCenter.X, hrp.Position.Y, fieldCenter.Z)
+                            hum:MoveTo(walkTarget)
+                        else
+                            Stats.Status = "Yeni Tokenler Bekleniyor..."
+                            hum:Move(Vector3.zero, false)
+                        end
+                    else
+                        Stats.Status = "Token Bekleniyor..."
+                        hum:Move(Vector3.zero, false)
+                    end
+                end
+            end
+        end
+
+        if tick() - lastUiUpdate > 0.35 then
+            lastUiUpdate = tick()
+            updateStatusUI()
+        end
+    end
+end)
+
+-- Cleanup function
+getgenv().AutoFarmTokenCleanup = function()
+    running = false
+    Config.Enabled = false
+    stopTween()
+    local hum, _ = getCharacterComponents()
+    if hum then
+        hum:Move(Vector3.zero, false)
+    end
+    pcall(function()
+        Window:Destroy()
+    end)
+end
+
+InfoTab:Button({
+    Title = "Scripti Kapat",
+    Callback = function()
+        getgenv().AutoFarmTokenCleanup()
+    end,
+})
+
+pcall(function()
+    FarmTab:Select()
+end)
+
+WindUI:Notify({
+    Title = "Dengeli Tween Aktif",
+    Content = "Combo coconutlara artık alana gitme hızıyla güvenli ve düz çizgide süzülür!",
+    Duration = 3,
+    Icon = "check-check",
+})
